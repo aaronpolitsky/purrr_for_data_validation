@@ -5,23 +5,191 @@ format: html
 editor: visual
 ---
 
-## Quarto
+## Intro
 
-Quarto enables you to weave together content and executable code into a finished document. To learn more about Quarto see <https://quarto.org>.
+This post explains an insight I had when thinking about a data validation problem--specifically how to run a bunch of data validation functions on one set of data while neatly keeping track of results in a table structure. I'll explain how I used purrr::map and tidyr::nest to iterate but sort of flipped the conventional method on its head in what I think is a pretty novel and unique way.
 
-## Running Code
+For those unfamiliar with iteration using purrr::map() and nesting data into list-columns, head over to [R4DS](https://r4ds.had.co.nz/many-models.html) for the whole story.
 
-When you click the **Render** button a document will be generated that includes both content and the output of embedded code. You can embed code like this:
+For the click-averse, below is a quick review:
+
+Background: Nesting Grouped Data as a Way to be Tidy
+
+Nesting data into a cell is a pretty slick feature of Tibbles. There's an argument that nesting data into a cell is more Tidy than otherwise, particularly on data having obvious groupings, such as panel data.
+
+Recall the three Tidy data principles:
+
+1.  Each variable must have its own column.
+
+2.  Each observation must have its own row.
+
+3.  Each value must have its own cell.
+
+### [![](https://d33wubrfki0l68.cloudfront.net/6f1ddb544fc5c69a2478e444ab8112fb0eea23f8/91adc/images/tidy-1.png)](https://d33wubrfki0l68.cloudfront.net/6f1ddb544fc5c69a2478e444ab8112fb0eea23f8/91adc/images/tidy-1.png)
+
+For grouped or panel data, tidy-ness depends in part on the level of detail you're interested in. Let's say each row is a student, and the dataset is grouped by instructor. If we're interested in learning about the population of students overall, we would probably just use the dataset as-is without nesting and maybe adjust for the effects of the instructor. In that case, each student is an observation, and they happen to have an instructor.
+
+| Student ID | Instructor ID | attendance % | final letter grade | ... |
+|------------|---------------|--------------|--------------------|-----|
+| 1          | 1             | ...          | ...                |     |
+| 2          | 1             |              |                    |     |
+| 3          | 1             |              |                    |     |
+| 4          | 2             |              |                    |     |
+| 5          | 2             |              |                    |     |
+| 6          | 2             |              |                    |     |
+| ...        |               |              |                    |     |
+|            |               |              |                    |     |
+
+: student data
+
+However, if we're interested in the instructors, we would consider each instructor the observation of interest. Below I've simply rearranged the Student and Instructor ID columns to illustrate that each instructor has a muliple rows--one for each student. If the level of observation is instructor-student, it's still tidy, but if we want an instructor-level dataset, this violates "Each observation must have its own row."
+
+| Instructor ID | Student ID | attendance % | final letter grade | ... |
+|---------------|------------|--------------|--------------------|-----|
+| 1             | 1          | ...          | ...                |     |
+| 1             | 2          |              |                    |     |
+| 1             | 3          |              |                    |     |
+| 2             | 4          |              |                    |     |
+| 2             | 5          |              |                    |     |
+| 2             | 6          |              |                    |     |
+|               | ...        |              |                    |     |
+|               |            |              |                    |     |
+
+: In order to get to an instructor-level dataset, we can *nest* each instructor's student-level data into a cell as seen below. Now 1) each instructor is a row, 2) the variable "student data" is a column, and 3) each cell has the instructor's student data nested into it. If we're interested in instructors, this is arguably more Tidy than the form above.
+
+| Instructor ID | student data                                                     |
+|-------------------|-----------------------------------------------------|
+| 1             | a tibble: \<student ID, attendance %, final letter grade, ... \> |
+| 2             | a tibble: \<student ID, attendance %, final letter grade, ... \> |
+| 3             | a tibble: \<student ID, attendance %, final letter grade, ... \> |
+| ...           | ...                                                              |
+| n-1           | a tibble: \<student ID, attendance %, final letter grade, ... \> |
+| n             | a tibble: \<student ID, attendance %, final letter grade, ... \> |
+
+This may seem like unneceessarily complicated housekeeping, but where this becomes really useful is when we start fitting models to each group in a grouped dataset. Then we can actually operate on the nested data and put the fitted model objects into the tibble to keep everything associated in one data structure.
+
+Consider the gapminder dataset:
 
 ```{r}
-1 + 1
+library(tidyverse)
+library(gapminder)
 ```
-
-You can add options to executable code like this
 
 ```{r}
-#| echo: false
-2 * 2
+gapminder
 ```
 
-The `echo: false` option disables the printing of code (only output is displayed).
+Its observations are country-years; it is grouped, panel data by country. But if we are going to operate on gapminder data one country at a time, it makes sense for us to nest each country's data into a cell, like this:
+
+```{r paged.print=TRUE}
+gapminder %>% 
+  group_by(country) %>% 
+  nest()
+```
+
+R4DS goes over this whole concept, but the nesting stores the tibbles in a column of type `list`. A list-column. It's a little bit of a weird tibble feature, but it's really handy.
+
+### Iterating on Nested Data Using the purrr Package
+
+One handy benefit of nested data is that it makes iteration really tidy. The first edition of R4DS goes over this in its [Many Models](https://r4ds.had.co.nz/many-models.html) chapter.
+
+The example goal is to fit a model to each country's data--where country is observation of interest. Let's compare how we might do that with and without using nested data.
+
+#### Iterating without nested data {#sec-iterating-without-nested-data}
+
+You could iterate using three separate objects:
+
+1.  an index of country names
+2.  the input dataset--all of it
+3.  a list of output models--one per country
+
+We can iterate over the country names, filter the data and fit a model to it, and save that model in another list by country name.
+
+```{r}
+countries <- 
+  gapminder %>% 
+  pull(country) %>% 
+  unique 
+
+fit_model_for_one_country <- function(c, data = gapminder) {
+    country_data <- 
+      data %>% 
+      filter(country == c) 
+    
+    lm(gdpPercap ~ year, data = country_data)
+  }
+
+models <- 
+  lapply(countries, FUN = fit_model_for_one_country, data = gapminder)
+
+names(models) <- countries
+```
+
+This will get the job done, which is ... fine. But we have three separate *things* that only we know are related:
+
+1.  the vector of countries
+2.  the data
+3.  the models
+
+The problem is, it's up to us, or our future selves, or someone else working on the project, to keep track of everything properly.
+
+Even though we named each model, we might have done it wrong or got the ordering wrong. And so could some other user of our code.
+
+It would be cleaner, tidier if you will, to have all of those things associated in some data structure. This is what the nesting does for us.
+
+#### Iterating using nested data
+
+Now consider a nested tibble with the country in one column, nested data in another, and the fitted models in a third. Each row is an observation, each variable is a column, each cell is a value. Everything is neatly tied together and Tidy.
+
+We'll need the map() from the purrr package to operate on the list-columns.
+
+```{r}
+library(purrr)
+
+nested_by_country <- 
+  gapminder %>% 
+  group_by(country) %>% 
+  nest()
+
+# subtly redefine fit_model for grouped data
+fit_model <- function(df) {
+  lm(gdpPercap ~ year, data = df)
+}
+
+models_by_country <- 
+  nested_by_country %>% 
+  mutate(model_fit = map(data, .f = fit_model))
+
+models_by_country
+```
+
+Now we have one object, a nested tibble called models_by_country, and in each row we have the data and the fit model. This is Tidy using nested data.
+
+This paradigm of grouping, nesting, and modeling is a common way to use purrr::map to iterate over, in this case, a nested dataset.
+
+But my problem was a little bit different.
+
+## The Data Validation Problem
+
+I had been working with a dataset that would occasionally update with new data, and I wanted to test certain fields on whether their datapoints made sense. Many were sanity check type tests, whether a datapoint fell between a lower and upper bound, among others.
+
+Each field required a somewhat unique set of validation tests.
+
+As i thought about the problem, what I had was a set of fields i wanted to test in various ways, and a set of tests per field. Each field had its own set of tests, many of which were unique to it.
+
+Let's use \<dataset\> as an example
+
+| Field Name | Test Name                    |
+|------------|------------------------------|
+| a          | is_missing                   |
+| a          | is_not_between_3_and_5       |
+| b          | is_negative                  |
+| b          | is_missing_when_a_is_present |
+
+I wanted to run tests on the the dataset, but i wanted the output to be organized by field and test.
+
+I could form a table of field-tests and then nest the data into a column called data, but the data is a constant here. And plus, that would be a huge object since it's replicating the data for each field-test--and there were hundreds.
+
+Furthermore, where does the code for each test live? how would i reference it? I could create a list of functions with their code and use the field-test list to index it, but that means it's a separate object or objects from the field-test object. We've already discussed above in [Iterating without nested data](#sec-iterating-without-nested-data) how that's not a great or ideal solution.
+
+It occurred to me to nest
